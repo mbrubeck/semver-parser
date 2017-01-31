@@ -13,3 +13,4 @@ Parsing of the semver spec
 [dependencies]
 regex = "0.1"
 lazy_static = "0.2.1"
+pest = "0.4.1"

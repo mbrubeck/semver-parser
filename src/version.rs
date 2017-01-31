@@ -1,48 +1,59 @@
+use pest::prelude::*;
 use std::fmt;
 
-use regex::Regex;
+impl_rdp! {
+    grammar! {
+        version = _{ num ~ ["."] ~ num ~ ["."] ~ num ~ pre? ~ build? }
 
-use common;
+        pre     = { ["-"] ~ ids }
+        ids     = _{ id ~ (["."] ~ id)* }
+        id      = { num | alnum }
 
-lazy_static! {
-    static ref REGEX: Regex = {
-        // a numeric identifier is either zero or multiple numbers without a leading zero
-        let numeric_identifier = r"0|(?:[1-9][0-9]*)";
+        build   = { ["+"] ~ alnums }
+        alnums  = _{ alnum ~ (["."] ~ alnum)* }
 
-        let major = numeric_identifier;
-        let minor = numeric_identifier;
-        let patch = numeric_identifier;
+        num     = { ["0"] | ['1'..'9'] ~ ['0'..'9']* }
+        alnum   = { (['A'..'Z'] | ['a'..'z'] | ['0'..'9'] | ["-"])* }
+    }
 
-        let letters_numbers_dash_dot = r"[-.A-Za-z0-9]+";
-
-        // This regex does not fully parse prereleases, just extracts the whole prerelease string.
-        // parse_version() will parse this further.
-        let pre = letters_numbers_dash_dot;
-
-        // This regex does not fully parse builds, just extracts the whole build string.
-        // parse_version() will parse this further.
-        let build = letters_numbers_dash_dot;
-
-        let regex = format!(r"^(?x) # heck yes x mode
-            (?P<major>{})           # major version
-            \.                      # dot
-            (?P<minor>{})           # minor version
-            \.                      # dot
-            (?P<patch>{})           # patch version
-            (?:-(?P<pre>{}))?       # optional prerelease version
-            (?:\+(?P<build>{}))?    # optional build metadata
-            $",
-            major,
-            minor,
-            patch,
-            pre,
-            build);
-        let regex = Regex::new(&regex);
-
-        // this unwrap is okay because everything above here is const, so this will never fail.
-        regex.unwrap()
-    };
+    process! {
+        compute(&self) -> Result<Version, ()> {
+            (x: parse_num(), y: parse_num(), z: parse_num(), pre: parse_pre(), build: parse_build()) => {
+                Ok(Version { major: x, minor: y, patch: z, pre: pre?, build: build? })
+            }
+        }
+        parse_pre(&self) -> Result<Vec<Identifier>, ()> {
+            (_: pre, ids: maybe_ids()) => if ids.is_empty() { Err(()) } else { Ok(ids) },
+            () => Ok(vec![])
+        }
+        parse_build(&self) -> Result<Vec<Identifier>, ()> {
+            (_: build, ids: maybe_alnums()) => if ids.is_empty() { Err(()) } else { Ok(ids) },
+            () => Ok(vec![])
+        }
+        maybe_ids(&self) -> Vec<Identifier> {
+            (_: id, first: parse_id(), mut rest: maybe_ids()) => {
+                rest.insert(0, first);
+                rest
+            },
+            () => vec![]
+        }
+        parse_id(&self) -> Identifier {
+            (&n: num) => Identifier::Numeric(n.parse::<u64>().unwrap()),
+            (&id: alnum) => Identifier::AlphaNumeric(id.to_owned()),
+        }
+        parse_num(&self) -> u64 {
+            (&n: num) => n.parse::<u64>().unwrap(),
+        }
+        maybe_alnums(&self) -> Vec<Identifier> {
+            (&first: alnum, mut rest: maybe_alnums()) => {
+                rest.insert(0, Identifier::AlphaNumeric(first.to_owned()));
+                rest
+            },
+            () => vec![]
+        }
+    }
 }
+
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Version {
@@ -62,23 +73,17 @@ pub enum Identifier {
 }
 
 pub fn parse(version: &str) -> Result<Version, String> {
-    let captures = match REGEX.captures(version.trim()) {
-        Some(captures) => captures,
-        None => return Err(From::from("Version did not parse properly.")),
-    };
-
-    let pre =
-        captures.name("pre").map(common::parse_meta).unwrap_or(vec![]);
-    let build =
-        captures.name("build").map(common::parse_meta).unwrap_or(vec![]);
-
-    Ok(Version {
-        major: captures.name("major").unwrap().parse().unwrap(),
-        minor: captures.name("minor").unwrap().parse().unwrap(),
-        patch: captures.name("patch").unwrap().parse().unwrap(),
-        pre: pre,
-        build: build,
-    })
+    let mut parser = Rdp::new(StringInput::new(version.trim()));
+    if !parser.version() {
+        return Err(From::from("Version did not parse properly."))
+    }
+    if !parser.end() {
+        return Err(format!("Version did not end properly: {:?}", parser.queue()))
+    }
+    if let Ok(version) = parser.compute() {
+        return Ok(version)
+    }
+    Err(From::from("Version did not compute properly."))
 }
 
 impl fmt::Display for Version {
